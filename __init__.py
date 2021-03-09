@@ -28,7 +28,7 @@ bl_info = {
 
 
 def bmesh_join(list_of_bmeshes, normal_update=False):
-    """ takes as input a list of bm references and outputs a single merged bmesh 
+    """ takes as input a list of bm references and outputs a single merged bmesh
     allows an additional 'normal_update=True' to force _normal_ calculations.
     """
     # create a bmesh host object
@@ -91,22 +91,8 @@ def bmesh_join(list_of_bmeshes, normal_update=False):
     return host_bmesh
 
 
-def simple_join(source, target):
-    """
-    joins a copy of the source mesh to the target mesh, does not set the right material index it seems
-    """
-    target_bmesh = bmesh.new()
+def join_meshes(source_mesh, target_mesh, remap_material_index_table, source_wmx, target_offset, source_offset):
 
-    target_bmesh.from_mesh(target.data)
-    target_bmesh.from_mesh(source.data)
-
-    target_bmesh.to_mesh(target.data)
-    target_bmesh.free()
-
-    target.data.update()
-
-
-def join_meshes(source_mesh, target_mesh):
     # create a new bmesh to modify,
     # this will hold all the new bmesh data resulting in the final joined mesh
     host_bmesh = bmesh.new()
@@ -131,7 +117,7 @@ def join_meshes(source_mesh, target_mesh):
     # add vertices from the source mesh
     for vertex in source_bmesh.verts:
         # adds vert to the host and sets the coordinates
-        add_vert(vertex.co)
+        add_vert((vertex.co + source_offset - target_offset) @ source_wmx)
 
     # Initialize the index values of this sequence.
     # This is the equivalent of looping over all elements and assigning the index values.
@@ -140,6 +126,11 @@ def join_meshes(source_mesh, target_mesh):
     # Ensure internal data needed for int subscription is initialized with verts/edges/faces, eg bm.verts[index].
     # This needs to be called again after adding/removing data in this sequence.
     host_bmesh.verts.ensure_lookup_table()
+
+    # TODO, this grabs the very first uv layer, need to add support for multiple UV layers
+    uv_layer = host_bmesh.loops.layers.uv[0]
+    source_uv_layer = source_bmesh.loops.layers.uv[0]
+    print(uv_layer)
 
     ### FACES ###
     # look at all the faces
@@ -153,8 +144,26 @@ def join_meshes(source_mesh, target_mesh):
         new_face = add_face(tuple(host_bmesh.verts[i.index+host_bmesh_verts_amount]
                                   for i in face.verts))
 
-        new_face.material_index = face.material_index
+        # reassing material index
+        for remap_index in remap_material_index_table:
+            if remap_index[0] == face.material_index:
+                new_face.material_index = remap_index[1]
+
+        # print("NEW - " + str(new_loop[uv_layer].uv))
+        #     print("OLD - " + str(face.loops[i][source_uv_layer].uv))
+
+        for i, new_loop in enumerate(new_face.loops):
+            new_loop[uv_layer].uv = face.loops[i][source_uv_layer].uv
+            # for loop in face.loops:
+            #     print(loop)
+            #     print(loop[uv_layer].uv)
+
+            # new_face.loops
+
+            # for i, loop in enumerate(face.loops):
+
     host_bmesh.faces.index_update()
+    host_bmesh.faces.ensure_lookup_table()
 
     ### EDGES ###
     for edge in source_bmesh.edges:
@@ -166,6 +175,17 @@ def join_meshes(source_mesh, target_mesh):
             # edge exists!
             pass
     host_bmesh.edges.index_update()
+    host_bmesh.edges.ensure_lookup_table()
+
+    ### custom data ###
+    print(source_bmesh.loops.layers.uv.keys())
+    print(source_bmesh.loops.layers.uv['UVMap'])
+
+    # for layprint(face)er in enumerate(source_bmesh.loops.layers):
+    # TODO uv_list is a list of uv tuples? need to grab this from the source mesh
+    # loop[uv_layer].uv = uv_list[i]
+    # print(uv)
+    # uv = loop[uv_layer].uv
 
     # if normal_update:
     host_bmesh.normal_update()
@@ -178,36 +198,85 @@ def join_meshes(source_mesh, target_mesh):
     target_mesh.update()
 
 
-def join_meshes_old(source, target):
-    # Get a BMesh representation
+def join_objects(source, target):
+    """
+    joins a copy of the source object mesh with the target object mesh
+    """
+
+    remap_material_index_table = copy_materials(source, target)
+
+    join_meshes(source.data, target.data,
+                remap_material_index_table, source.matrix_world, target.location, source.location)
+
+    bpy.data.objects.remove(source)
+
+
+def simple_join(source, target):
+    """
+    Very simple joins function.
+    Joins a copy of the source object's mesh with the target mesh. 
+    Does not transfer CustomData etc.
+    """
     target_bmesh = bmesh.new()
-    source_bmesh = bmesh.new()
 
     target_bmesh.from_mesh(target.data)
-    source_bmesh.from_mesh(source.data)
-
-    mesh_list = [target_bmesh, source_bmesh]
-    joined_mesh = bmesh_join(mesh_list)
-
-    joined_mesh.to_mesh(target.data)
-    # target_bmesh.free()
-
-    target.data.update()
-
-    return
-
-    wmx = source.matrix_world
-
-    vertices_in_source = len(source_bmesh.verts)
-
-    for vertex in source_bmesh.verts:
-        target_bmesh.verts.new(
-            (vertex.co + source.location - target.location) @ wmx)
+    target_bmesh.from_mesh(source.data)
 
     target_bmesh.to_mesh(target.data)
     target_bmesh.free()
 
     target.data.update()
+
+
+def copy_materials(source_object, target_object):
+    """
+    adds slots and links materials from one object to another
+    """
+    source_object_materials_count = len(source_object.data.materials)
+    targetobject_materials_count = len(target_object.data.materials)
+
+    # list of tuples for remapping, source index, new index on target
+    remap_index_table = []
+
+    for material_index in range(source_object_materials_count):
+        current_source_material = None
+        current_target_material = None
+
+        if source_object.data.materials[material_index]:
+            print("source.ID - " + str(material_index) + " : " +
+                  source_object.data.materials[material_index].name)
+            current_source_material = source_object.data.materials[material_index]
+
+        else:
+            print("source.ID - " + str(material_index) + " : " +
+                  "NONE")
+
+        if material_index < targetobject_materials_count:
+            if target_object.data.materials[material_index]:
+                print("target.ID - " + str(material_index) + " : " +
+                      target_object.data.materials[material_index].name)
+                current_target_material = target_object.data.materials[material_index]
+            else:
+                print("target.ID - " + str(material_index) + " : " +
+                      "NONE")
+
+        if current_source_material:
+            if current_source_material:
+                # both are not none
+                if current_source_material != current_target_material:
+                    # and they are not the same
+                    # append the source to the end of target
+                    target_object.data.materials.append(
+                        source_object.data.materials[material_index])
+                    remap_index_table.append(
+                        (material_index, len(target_object.data.materials) - 1))
+
+    for remap in remap_index_table:
+        # print(remap)
+        print("original index : " +
+              str(remap[0]) + " - new index : " + str(remap[1]))
+
+    return remap_index_table
 
 
 class MCPY_OT_copy_mesh_to_active(bpy.types.Operator):
@@ -219,12 +288,14 @@ class MCPY_OT_copy_mesh_to_active(bpy.types.Operator):
     def execute(self, context):
         target = context.active_object
         # print("TARGET: " + target.name)
-        source = None
+        source_objects = []
+
         for obj in context.selected_objects:
             if obj is not target:
-                source = obj
+                source_objects.append(obj)
 
-        join_meshes(source.data, target.data)
+        for source in source_objects:
+            join_objects(source, target)
 
         return {'FINISHED'}
 
