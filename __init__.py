@@ -70,20 +70,20 @@ def bmesh_join(list_of_bmeshes, normal_update=False):
 
                 new_face = add_face(tuple(host_bmesh.verts[i.index+host_bmesh_verts_amount]
                                           for i in face.verts))
-                new_face.material_index = face.material_index
 
+                new_face.material_index = face.material_index
             host_bmesh.faces.index_update()
 
         if bm_to_add.edges:
             for edge in bm_to_add.edges:
-                edge_seq = tuple(bm.verts[i.index+bm_verts_amount]
+                edge_seq = tuple(host_bmesh.verts[i.index+host_bmesh_verts_amount]
                                  for i in edge.verts)
                 try:
                     add_edge(edge_seq)
                 except ValueError:
                     # edge exists!
                     pass
-            bm.edges.index_update()
+            host_bmesh.edges.index_update()
 
     if normal_update:
         host_bmesh.normal_update()
@@ -91,9 +91,96 @@ def bmesh_join(list_of_bmeshes, normal_update=False):
     return host_bmesh
 
 
-def join_meshes(source, target):
+def simple_join(source, target):
+    """
+    joins a copy of the source mesh to the target mesh, does not set the right material index it seems
+    """
+    target_bmesh = bmesh.new()
+
+    target_bmesh.from_mesh(target.data)
+    target_bmesh.from_mesh(source.data)
+
+    target_bmesh.to_mesh(target.data)
+    target_bmesh.free()
+
+    target.data.update()
+
+
+def join_meshes(source_mesh, target_mesh):
+    # create a new bmesh to modify,
+    # this will hold all the new bmesh data resulting in the final joined mesh
+    host_bmesh = bmesh.new()
+
+    # function pointers, for the lazy
+    add_vert = host_bmesh.verts.new
+    add_face = host_bmesh.faces.new
+    add_edge = host_bmesh.edges.new
+
+    # add mesh data from the original 'target' mesh data-block to the host_bmesh
+    # add vertices of the current bmesh to the host object
+    host_bmesh.from_mesh(target_mesh)
+
+    # create a bmesh from the source mesh, used to look at the data which makes up this mesh
+    source_bmesh = bmesh.new()
+    source_bmesh.from_mesh(source_mesh)
+
+    # get the amount of vertices in the bmesh currently being looked at, this is needed to append mesh data if mesh already exists.
+    host_bmesh_verts_amount = len(host_bmesh.verts)
+
+    ### VERTEX ###
+    # add vertices from the source mesh
+    for vertex in source_bmesh.verts:
+        # adds vert to the host and sets the coordinates
+        add_vert(vertex.co)
+
+    # Initialize the index values of this sequence.
+    # This is the equivalent of looping over all elements and assigning the index values.
+    host_bmesh.verts.index_update()
+
+    # Ensure internal data needed for int subscription is initialized with verts/edges/faces, eg bm.verts[index].
+    # This needs to be called again after adding/removing data in this sequence.
+    host_bmesh.verts.ensure_lookup_table()
+
+    ### FACES ###
+    # look at all the faces
+    for face in source_bmesh.faces:
+        # add a new face to the host mesh
+        # using a tuple of
+        # every vert in the host mesh
+        # where the vert chosen is the index added by the amount of vertices in the host mesh, which will grow every time a new mesh is added
+        # the index is taken from each vertex in the source face, which would assume they are the same
+
+        new_face = add_face(tuple(host_bmesh.verts[i.index+host_bmesh_verts_amount]
+                                  for i in face.verts))
+
+        new_face.material_index = face.material_index
+    host_bmesh.faces.index_update()
+
+    ### EDGES ###
+    for edge in source_bmesh.edges:
+        edge_seq = tuple(host_bmesh.verts[i.index+host_bmesh_verts_amount]
+                         for i in edge.verts)
+        try:
+            add_edge(edge_seq)
+        except ValueError:
+            # edge exists!
+            pass
+    host_bmesh.edges.index_update()
+
+    # if normal_update:
+    host_bmesh.normal_update()
+
+    # put the bmesh data back into the target mesh block
+    host_bmesh.to_mesh(target_mesh)
+    host_bmesh.free()
+
+    # update the mesh, so it will redraw
+    target_mesh.update()
+
+
+def join_meshes_old(source, target):
     # Get a BMesh representation
-    target_bmesh = bmesh.new()   # create an empty BMesh
+    target_bmesh = bmesh.new()
     source_bmesh = bmesh.new()
 
     target_bmesh.from_mesh(target.data)
@@ -137,12 +224,7 @@ class MCPY_OT_copy_mesh_to_active(bpy.types.Operator):
             if obj is not target:
                 source = obj
 
-        target_bmesh = bmesh.new()   # create an empty BMesh
-        source_bmesh = bmesh.new()
-        # print("SOURCE: " + source.name)
-
-        join_meshes(source, target)
-        # changer(context.active_object)
+        join_meshes(source.data, target.data)
 
         return {'FINISHED'}
 
